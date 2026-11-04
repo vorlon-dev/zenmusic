@@ -1,0 +1,3 @@
+-dontwarn org.json.**
+-dontwarn okhttp3.**
+-dontwarn okio.**

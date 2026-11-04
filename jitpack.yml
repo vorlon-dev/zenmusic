@@ -1,0 +1,5 @@
+# JitPack build configuration — https://jitpack.io/#vorlon-dev/zenmusic
+jdk:
+  - openjdk17
+install:
+  - ./gradlew publishToMavenLocal
