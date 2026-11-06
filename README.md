@@ -118,7 +118,7 @@ dependencyResolutionManagement { repositories { maven("https://jitpack.io") } }
 
 // app/build.gradle.kts
 dependencies {
-    implementation("com.github.vorlon-dev:zenmusic:v1.1.0")
+    implementation("com.github.vorlon-dev:zenmusic:v1.1.1")
     implementation("androidx.media3:media3-exoplayer:1.5.1")
 }
 ```
@@ -126,11 +126,11 @@ dependencies {
 ### B. Cherry-pick modules
 
 ```kotlin
-implementation("com.github.vorlon-dev:zen-core:v1.1.0")
-implementation("com.github.vorlon-dev:zen-potoken:v1.1.0")
-implementation("com.github.vorlon-dev:zen-extractor:v1.1.0")
-implementation("com.github.vorlon-dev:zen-resolver:v1.1.0")
-implementation("com.github.vorlon-dev:zen-datasource:v1.1.0") // optional
+implementation("com.github.vorlon-dev:zen-core:v1.1.1")
+implementation("com.github.vorlon-dev:zen-potoken:v1.1.1")
+implementation("com.github.vorlon-dev:zen-extractor:v1.1.1")
+implementation("com.github.vorlon-dev:zen-resolver:v1.1.1")
+implementation("com.github.vorlon-dev:zen-datasource:v1.1.1") // optional
 ```
 
 ### Release builds
