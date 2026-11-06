@@ -79,6 +79,42 @@ data class ZenArtist(
     val subscribers: String? = null,
 )
 
+data class ZenPlaylist(
+    val uri: String,
+    val title: String,
+    val author: String? = null,
+    val artworkUri: String? = null,
+    val trackCount: Int = -1,
+)
+
+/**
+ * One home-feed / related carousel: a titled shelf of mixed content (the
+ * upstream order is preserved: tracks, then albums, artists, playlists).
+ */
+data class ZenShelf(
+    val title: String?,
+    val tracks: List<ZenTrack> = emptyList(),
+    val albums: List<ZenAlbum> = emptyList(),
+    val artists: List<ZenArtist> = emptyList(),
+    val playlists: List<ZenPlaylist> = emptyList(),
+) {
+    val isEmpty: Boolean
+        get() = tracks.isEmpty() && albums.isEmpty() && artists.isEmpty() && playlists.isEmpty()
+}
+
+/** A home-feed filter chip ("Listen again", "New releases", …). */
+data class ZenHomeChip(
+    val title: String,
+    /** Browse params to pass to [ZenHomeApi.feed] for this chip's view. */
+    val params: String? = null,
+)
+
+/** The real home feed: filter chips + content shelves. */
+data class ZenHomeFeed(
+    val chips: List<ZenHomeChip>,
+    val shelves: List<ZenShelf>,
+)
+
 /** Selected audio format of a resolved stream (metadata only — no URLs). */
 data class ZenFormat(
     val quality: ZenQuality,

@@ -102,3 +102,26 @@ suffix itself) is stored as `base64(iv ‖ ciphertext ‖ tag)`.
 | Frida on rooted device | can dump runtime state (limitation #2) |
 | Network observer | sees real hosts (limitation #1) |
 | Debug build of host app | shower decoys instead of real metadata |
+
+## 7. What this protection is — and is not (v1.1.2)
+
+The engine speaks the same InnerTube protocol shape the official web player
+uses (endpoints, headers, request bodies), so its traffic is indistinguishable
+from the official client at the protocol level — that is inherent to how the
+protocol works, not a deception layer. Combined with the vault, the `zen://`
+scheme, decoy noise and R8 full-mode obfuscation, static/LLM analysis of the
+artifact finds no readable endpoints, hosts, or keys, and reproducing the
+pipeline from bytecode is genuinely painful.
+
+Two honest boundaries:
+
+1. **No absolute anti-analysis.** A determined human analyst with the APK and
+   time can always reconstruct behavior. The protections raise cost and noise;
+   they are not a guarantee.
+2. **Not for evading platform review.** Nothing in this library is designed
+   to defeat Google Play / App Store review, malware scanning, or platform
+   security enforcement — and it must not be used that way. Publishing an app
+   built on it still means the app carries the upstream platform's extraction
+   behavior; the developer owns that decision and its consequences (ToS,
+   takedowns, account actions). Disguise here protects *your code surface*,
+   not a claim that the app is something it is not.

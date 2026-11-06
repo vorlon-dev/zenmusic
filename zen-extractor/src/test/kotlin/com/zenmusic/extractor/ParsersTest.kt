@@ -9,6 +9,7 @@ import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -433,4 +434,181 @@ class ParsersTest {
 
     private fun track(videoId: String, source: ZenContentSource): ZenTrack =
         ZenTrack(uri = ZenUri.mint(videoId), title = "t-$videoId", artists = emptyList(), source = source)
+
+    private fun twoRow(
+        title: String,
+        subtitle: String,
+        videoId: String? = null,
+        browseId: String? = null,
+        playlistId: String? = null,
+    ): JSONObject {
+        val watch = JSONObject()
+        videoId?.let { watch.put("videoId", it) }
+        playlistId?.let { watch.put("playlistId", it) }
+        val nav = JSONObject()
+        if (videoId != null || playlistId != null) nav.put("watchEndpoint", watch)
+        browseId?.let { nav.put("browseEndpoint", JSONObject().put("browseId", it)) }
+        return JSONObject().put(
+            "musicTwoRowItemRenderer",
+            JSONObject()
+                .put("title", runsObj(title))
+                .put("subtitle", runsObj(subtitle))
+                .put("navigationEndpoint", nav)
+                .put(
+                    "thumbnailRenderer",
+                    JSONObject().put(
+                        "musicThumbnailRenderer",
+                        JSONObject().put(
+                            "thumbnail",
+                            JSONObject().put(
+                                "thumbnails",
+                                JSONArray().put(JSONObject().put("url", "https://img.invalid/t.jpg").put("width", 544).put("height", 544)),
+                            ),
+                        ),
+                    ),
+                ),
+        )
+    }
+
+    @Test
+    fun `home feed parses chips and mixed shelves`() {
+        val home = JSONObject()
+            .put(
+                "header",
+                JSONObject().put(
+                    "feedFilterChipBarRenderer",
+                    JSONObject().put(
+                        "chips",
+                        JSONArray().put(
+                            JSONObject().put(
+                                "chipCloudChipRenderer",
+                                JSONObject()
+                                    .put("text", runsObj("Listen again"))
+                                    .put("navigationEndpoint", JSONObject().put("watchEndpoint", JSONObject().put("params", "chip-p-1"))),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            .put(
+                "contents",
+                JSONObject().put(
+                    "sectionListRenderer",
+                    JSONObject().put(
+                        "contents",
+                        JSONArray().put(
+                            JSONObject().put(
+                                "musicCarouselShelfRenderer",
+                                JSONObject()
+                                    .put(
+                                        "header",
+                                        JSONObject().put(
+                                            "musicCarouselShelfBasicHeaderRenderer",
+                                            JSONObject().put("title", runsObj("Mixed for you")),
+                                        ),
+                                    )
+                                    .put(
+                                        "contents",
+                                        JSONArray()
+                                            .put(twoRow("Song A", "Artist A", videoId = "aaaaaaaaaaa"))
+                                            .put(twoRow("Album B", "Artist B", browseId = "MPREb_album1"))
+                                            .put(twoRow("Artist C", "1.2M subscribers", browseId = "UCartist123"))
+                                            .put(twoRow("Playlist D", "12 tracks", playlistId = "PLplay1234")),
+                                    ),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+
+        val feed = Parsers.parseHomeFeed(home)
+        assertEquals(1, feed.chips.size)
+        assertEquals("Listen again", feed.chips[0].title)
+        assertEquals("chip-p-1", feed.chips[0].params)
+
+        assertEquals(1, feed.shelves.size)
+        val shelf = feed.shelves[0]
+        assertEquals("Mixed for you", shelf.title)
+        assertEquals(1, shelf.tracks.size)
+        assertEquals("Song A", shelf.tracks[0].title)
+        assertTrue(shelf.tracks[0].uri.startsWith("zen://"))
+        assertEquals(1, shelf.albums.size)
+        assertEquals("Album B", shelf.albums[0].title)
+        assertEquals(1, shelf.artists.size)
+        assertEquals("Artist C", shelf.artists[0].name)
+        assertEquals(1, shelf.playlists.size)
+        assertEquals("Playlist D", shelf.playlists[0].title)
+    }
+
+    @Test
+    fun `watch-next related tab is located and related shelves parse`() {
+        val watchNext = JSONObject().put(
+            "contents",
+            JSONObject().put(
+                "singleColumnMusicWatchNextRenderer",
+                JSONObject().put(
+                    "tabs",
+                    JSONArray()
+                        .put(JSONObject().put("tabRenderer", JSONObject().put("title", "Queue")))
+                        .put(
+                            JSONObject().put(
+                                "tabRenderer",
+                                JSONObject()
+                                    .put("title", "Related")
+                                    .put(
+                                        "endpoint",
+                                        JSONObject().put(
+                                            "watchEndpoint",
+                                            JSONObject()
+                                                .put("videoId", "aaaaaaaaaaa")
+                                                .put("playlistId", "RDAMVMaaaaaaaaaaa")
+                                                .put("params", "related-params-1"),
+                                        ),
+                                    ),
+                            ),
+                        ),
+                ),
+            ),
+        )
+
+        val tab = Parsers.watchNextRelatedTab(watchNext)
+        assertNotNull(tab)
+        assertEquals("related-params-1", tab!!.params)
+        assertEquals("RDAMVMaaaaaaaaaaa", tab.playlistId)
+
+        // the related response itself: one carousel of tracks
+        val related = JSONObject().put(
+            "contents",
+            JSONObject().put(
+                "sectionListRenderer",
+                JSONObject().put(
+                    "contents",
+                    JSONArray().put(
+                        JSONObject().put(
+                            "musicCarouselShelfRenderer",
+                            JSONObject()
+                                .put(
+                                    "header",
+                                    JSONObject().put(
+                                        "musicCarouselShelfBasicHeaderRenderer",
+                                        JSONObject().put("title", runsObj("You might also like")),
+                                    ),
+                                )
+                                .put(
+                                    "contents",
+                                    JSONArray()
+                                        .put(twoRow("Related 1", "R Artist", videoId = "rbbbbbbbbbb"))
+                                        .put(twoRow("Related 2", "R Artist 2", videoId = "rcccccccccc")),
+                                ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        val shelves = Parsers.parseRelatedShelves(related)
+        assertEquals(1, shelves.size)
+        assertEquals("You might also like", shelves[0].title)
+        assertEquals(2, shelves[0].tracks.size)
+        assertEquals("Related 1", shelves[0].tracks[0].title)
+    }
 }

@@ -86,6 +86,35 @@ class ZenResolverTest {
         broker.clear()
     }
 
+    @Test
+    fun `prefetched stream wins the resolve without extraction`() = runTest {
+        val resolver = ZenResolver(extractor(), ZenConfig(), tamperDetector = { false })
+        val uri = ZenUri.mint("prefetch0001")
+        // register a plan directly (no network) and remember it as prefetched
+        val stream = resolver.broker.register(
+            StreamPlan(
+                "prefetch0001",
+                "https://x.invalid/prefetch",
+                com.zenmusic.core.model.ZenFormat(ZenQuality.HIGH, 128, "opus", "webm"),
+                false,
+            ),
+        )
+        assertTrue(!resolver.isPrefetched(uri))
+        resolver.rememberPrefetched(uri, null, stream)
+        assertTrue(resolver.isPrefetched(uri))
+
+        // resolve must return the prefetched stream (same handle) and never
+        // touch the extractor
+        val resolved = resolver.resolve(uri)
+        assertEquals(stream.handle, resolved.handle)
+
+        // prefetch cache is consumed on hit and cleared on destroy
+        assertTrue(!resolver.isPrefetched(uri))
+        resolver.rememberPrefetched(uri, null, stream)
+        resolver.destroy()
+        assertTrue(!resolver.isPrefetched(uri))
+    }
+
     private object NoopProvider : PotokenProvider {
         override suspend fun sessionToken(sessionIdentifier: String): PoToken =
             PoToken("x", PoTokenType.SESSION, sessionIdentifier, 0L)

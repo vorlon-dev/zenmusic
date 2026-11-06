@@ -44,5 +44,6 @@ internal object ZenVaultConsts {
         "yt.host" to "MoKZVfRo2zG90dSNO0f3ka/kuuIPObWfIQFnyVca+V1ji3RVcmuYM+Jugg==",
         "yt.origin" to "Ai382J7O5iOfKD+BSttpnanm0r36pprigFjHAmHwsHCkrctqHHEFvGVPJkG7VwpswCPp",
         "yt.filter.videos" to "FAieGbTn9r0OHShKMBwuMeDesoBrf0Vv2gPUs2BqRKa40ffibQHhiw==",
+        "it.browse.home" to "QER6kVr7f701ji5IdksQBScSnO8ManIhwef4zMmk75GdbeCvUsMqEA==",
     )
 }

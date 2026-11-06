@@ -32,6 +32,8 @@ class ZenVaultTest {
             "gv.host", "jnn.host", "jnn.key", "jnn.reqkey", "lrc.host",
             "it.filter.songs", "it.filter.videos", "it.filter.albums", "it.filter.artists",
             "web.clientver", "jnn.create.path", "jnn.generate.path", "status.ok",
+            "img.host", "it.path.prefix", "hdr.client.name", "hdr.client.ver",
+            "yt.host", "yt.origin", "yt.filter.videos", "it.browse.home",
         )) {
             assertTrue("failed: $id", ZenVault.openOrNull(id)!!.isNotEmpty())
         }

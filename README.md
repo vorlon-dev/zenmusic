@@ -12,7 +12,7 @@ upstream platform is **architecturally invisible** behind the disguised
 
 ```kotlin
 // 1. settings.gradle.kts → repositories { maven("https://jitpack.io") }
-// 2. build.gradle.kts    → implementation("com.github.vorlon-dev:zenmusic:v1.1.0")
+// 2. build.gradle.kts    → implementation("com.github.vorlon-dev:zenmusic:v1.1.2")
 
 val zen = ZenMusic.initialize(context)
 
@@ -118,7 +118,7 @@ dependencyResolutionManagement { repositories { maven("https://jitpack.io") } }
 
 // app/build.gradle.kts
 dependencies {
-    implementation("com.github.vorlon-dev:zenmusic:v1.1.1")
+    implementation("com.github.vorlon-dev:zenmusic:v1.1.2")
     implementation("androidx.media3:media3-exoplayer:1.5.1")
 }
 ```
@@ -126,11 +126,11 @@ dependencies {
 ### B. Cherry-pick modules
 
 ```kotlin
-implementation("com.github.vorlon-dev:zen-core:v1.1.1")
-implementation("com.github.vorlon-dev:zen-potoken:v1.1.1")
-implementation("com.github.vorlon-dev:zen-extractor:v1.1.1")
-implementation("com.github.vorlon-dev:zen-resolver:v1.1.1")
-implementation("com.github.vorlon-dev:zen-datasource:v1.1.1") // optional
+implementation("com.github.vorlon-dev:zen-core:v1.1.2")
+implementation("com.github.vorlon-dev:zen-potoken:v1.1.2")
+implementation("com.github.vorlon-dev:zen-extractor:v1.1.2")
+implementation("com.github.vorlon-dev:zen-resolver:v1.1.2")
+implementation("com.github.vorlon-dev:zen-datasource:v1.1.2") // optional
 ```
 
 ### Release builds
@@ -160,13 +160,19 @@ ZenEngine
  ├─ search.openVideos(query)                   // open-platform uploads only
  ├─ search.videos/albums/artists(query)        // music-catalog shelves
  ├─ search.all(query)                          // SearchResults (music shelves + open uploads)
- ├─ radio.radioFor(uri) / radio.related(uri)    // List<ZenTrack> autoplay queue
- ├─ lyrics.get(track): ZenLyrics?               // synced LRC / plain
- ├─ track(uri): ZenTrack                        // metadata
- ├─ resolve(uri, quality?): ZenStream           // opaque handle + format meta
- ├─ artwork(uri): ByteArray?                    // disguised artwork fetch
- ├─ artworkBitmap(uri): Bitmap?                 // decoded, ready for ImageView
- └─ dataSourceFactory                           // → your ExoPlayer (plays + serves artwork)
+ ├─ home.feed(chipParams?)                     // ZenHomeFeed — real home feed: chips + titled shelves
+ ├─ radio.radioFor(uri)                        // List<ZenTrack> mix queue
+ ├─ radio.queue(uri)                           // watch-next queue for one song
+ ├─ radio.related(uri)                         // Related-tab tracks (merged carousels)
+ ├─ radio.relatedShelves(uri)                  // Related tab as titled ZenShelfs
+ ├─ lyrics.get(track): ZenLyrics?              // synced LRC / plain
+ ├─ track(uri): ZenTrack                       // metadata
+ ├─ resolve(uri, quality?): ZenStream          // opaque handle + format meta
+ ├─ prefetch(uri) / prefetchAll(uris)          // resolve in the background → instant next play
+ ├─ warmup()                                   // re-warm the chain (auto at initialize)
+ ├─ artwork(uri): ByteArray?                   // disguised artwork fetch
+ ├─ artworkBitmap(uri): Bitmap?                // decoded, ready for ImageView
+ └─ dataSourceFactory                          // → your ExoPlayer (plays + serves artwork)
 
 ZenStream   // uri, format(quality/bitrate/codec/container), isLive, handle, expiry
 ZenTrack    // + source: ZenContentSource (MUSIC / VIDEO), viewsCount
@@ -186,6 +192,59 @@ zen.search.openVideos("query")                             // same, explicit
 Open-platform results carry `source = ZenContentSource.VIDEO` and resolve
 through the same engine and the same `zen://` uris — one playback path for
 everything.
+
+### Home feed (v1.1.2)
+
+The real home feed — the same shelves the official client shows on launch
+("Listen again", "Mixed for you", "New releases", …), with filter chips:
+
+```kotlin
+val feed = zen.home.feed()
+feed.shelves.forEach { shelf ->                 // ZenShelf: title + tracks/albums/artists/playlists
+    show(shelf.title, shelf.tracks)
+}
+val chip = feed.chips.first { it.title == "Listen again" }
+val again = zen.home.feed(chip.params)          // re-query for a chip's section
+```
+
+### Queue / related (v1.1.2)
+
+Two-phase related — the same flow the official client uses (watch-next for
+the mix queue + tab endpoints, then a second call with the Related tab's
+serialized params):
+
+```kotlin
+val queue   = zen.radio.radioFor(track.uri)     // mix queue around the seed
+val related = zen.radio.related(track.uri)      // Related-tab tracks, merged
+val shelves = zen.radio.relatedShelves(track.uri) // "You might also like" …
+
+// Fast autoplay: resolve the next item in the background while the current
+// song plays — the transition is then instant.
+lifecycleScope.launch { zen.prefetch(related[0].uri) }
+```
+
+### Warm start (v1.1.2)
+
+`ZenMusic.initialize` now warms the whole chain in the background (session
+visitor → PO-token WebView mint → player-JS cipher) while the host app is
+still launching. The first playback resolves in a single request instead of
+a cold-start chain; player responses are cached for 20 min so repeat plays
+are effectively free. Tune with `ZenConfig(warmupOnStart = …,
+playerCacheTtlSeconds = …)`.
+
+### Your own vault keys
+
+Ship your own build with your own key material — the bundled
+`tools/zenvault_keygen.py` (stdlib-only; `seal`/`open` want pycryptodome)
+generates fragments, prints the Kotlin snippet and seals secrets:
+
+```bash
+python3 tools/zenvault_keygen.py new            # 3 fresh fragments (chmod 600)
+python3 tools/zenvault_keygen.py kotlin         # paste into ZenVaultKey.kt
+python3 tools/zenvault_keygen.py seal it.host "<your value>"
+```
+
+Keep `zenvault_fragments.json` private; it is git-ignored by default.
 
 ### Artwork
 
@@ -246,19 +305,19 @@ zen://b/<browse-id>.<decoy-suffix>       album/artist browse reference
 ```
 
 **JitPack:** push this repo to GitHub, then cut a tag — the tag string is
-the version consumers use (a `v`-prefixed tag serves as `v1.1.0`):
+the version consumers use (a `v`-prefixed tag serves as `v1.1.2`):
 
 ```bash
-git tag -a v1.1.0 -m "ZenMusic 1.1.0 — open-platform search scopes + end-to-end artwork"
-git push origin v1.1.0
+git tag -a v1.1.2 -m "ZenMusic 1.1.2 — warm start + real home feed + two-phase related queues"
+git push origin v1.1.2
 ```
 
 JitPack builds all modules on request (see `jitpack.yml`: JDK 17 +
 `publishToMavenLocal`); watch the build at
-`https://jitpack.io/com/github/vorlon-dev/zenmusic/v1.1.0/build.log` or
+`https://jitpack.io/com/github/vorlon-dev/zenmusic/v1.1.2/build.log` or
 browse versions at `https://jitpack.io/#vorlon-dev/zenmusic`. Verified:
-both group forms resolve — `com.github.vorlon-dev:zenmusic:v1.1.0` (short,
-repo-level alias) and `com.github.vorlon-dev.zenmusic:zenmusic:v1.1.0`
+both group forms resolve — `com.github.vorlon-dev:zenmusic:v1.1.2` (short,
+repo-level alias) and `com.github.vorlon-dev.zenmusic:zenmusic:v1.1.2`
 (canonical multi-module form); transitive modules publish under
 `com.github.vorlon-dev.zenmusic:<module>` in either case.
 

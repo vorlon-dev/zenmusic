@@ -10,3 +10,5 @@ captures/
 *.keystore
 !debug.keystore
 *.jks
+zenvault_fragments.json
+tools/zenvault_fragments.json

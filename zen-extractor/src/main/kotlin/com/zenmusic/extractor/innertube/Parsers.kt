@@ -412,4 +412,237 @@ internal object Parsers {
         }
         return out.distinctBy { it.uri }
     }
+
+    // ---------- home feed / related shelves ----------
+
+    internal class HomeFeedPayload(
+        val chips: List<com.zenmusic.core.model.ZenHomeChip>,
+        val shelves: List<com.zenmusic.core.model.ZenShelf>,
+    )
+
+    /**
+     * Parses the music home feed (`browse` FEmusic_home): filter chips plus
+     * every content carousel (`musicCarouselShelfRenderer` / legacy
+     * `musicShelfRenderer`), in upstream order.
+     */
+    internal fun parseHomeFeed(response: JSONObject): HomeFeedPayload {
+        val chips = ArrayList<com.zenmusic.core.model.ZenHomeChip>()
+        for (chip in JsonWalk.findAllObjects(response, "chipCloudChipRenderer")) {
+            val title = JsonWalk.allRunText(chip.optJSONObject("text"))
+                ?: chip.optJSONObject("text")?.optString("simpleText")
+                ?: continue
+            val params = chip.optJSONObject("navigationEndpoint")
+                ?.optJSONObject("watchEndpoint")?.optString("params")?.takeIf { it.isNotEmpty() }
+                ?: chip.optJSONObject("navigationEndpoint")
+                    ?.optJSONObject("browseEndpoint")?.optString("params")?.takeIf { it.isNotEmpty() }
+            chips.add(com.zenmusic.core.model.ZenHomeChip(title, params))
+        }
+
+        val shelves = ArrayList<com.zenmusic.core.model.ZenShelf>()
+        for (carousel in JsonWalk.findAllObjects(response, "musicCarouselShelfRenderer")) {
+            val title = JsonWalk.firstRunText(
+                carousel.optJSONObject("header")
+                    ?.optJSONObject("musicCarouselShelfBasicHeaderRenderer")
+                    ?.optJSONObject("title"),
+            )
+                ?: JsonWalk.allRunText(carousel.optJSONObject("header"))
+            val shelf = parseShelfContents(carousel.optJSONArray("contents"), title)
+            if (!shelf.isEmpty) shelves.add(shelf)
+        }
+        if (shelves.isEmpty()) {
+            // Degraded shape: bare section shelves.
+            for (shelfRenderer in JsonWalk.findAllObjects(response, "musicShelfRenderer")) {
+                val title = JsonWalk.firstRunText(shelfRenderer.optJSONObject("title")).orEmpty()
+                val shelf = parseShelfContents(shelfRenderer.optJSONArray("contents"), title)
+                if (!shelf.isEmpty) shelves.add(shelf)
+            }
+        }
+        return HomeFeedPayload(chips, shelves)
+    }
+
+    /**
+     * Parses a related-songs response: every carousel shelf becomes a
+     * [com.zenmusic.core.model.ZenShelf] ("You might also like", "Similar to
+     * …"), exactly how the music app lays out its Related tab.
+     */
+    internal fun parseRelatedShelves(response: JSONObject): List<com.zenmusic.core.model.ZenShelf> {
+        val shelves = ArrayList<com.zenmusic.core.model.ZenShelf>()
+        for (carousel in JsonWalk.findAllObjects(response, "musicCarouselShelfRenderer")) {
+            val title = JsonWalk.firstRunText(
+                carousel.optJSONObject("header")
+                    ?.optJSONObject("musicCarouselShelfBasicHeaderRenderer")
+                    ?.optJSONObject("title"),
+            )
+                ?: JsonWalk.allRunText(carousel.optJSONObject("header"))
+            val shelf = parseShelfContents(carousel.optJSONArray("contents"), title)
+            if (!shelf.isEmpty) shelves.add(shelf)
+        }
+        if (shelves.isEmpty()) {
+            val queue = parseRadioQueue(response)
+            if (queue.isNotEmpty()) shelves.add(com.zenmusic.core.model.ZenShelf(null, tracks = queue))
+        }
+        return shelves
+    }
+
+    /**
+     * Locates the Related tab of a watch-next response: its serialized watch
+     * endpoint (videoId / playlistId / params) needed for the second `next`
+     * call that actually returns the related carousels.
+     */
+    internal class RelatedTab(
+        val videoId: String?,
+        val playlistId: String?,
+        val params: String?,
+    )
+
+    internal fun watchNextRelatedTab(response: JSONObject): RelatedTab? {
+        val tabs = JsonWalk.findArray(response, "tabs") ?: return null
+        for (i in 0 until tabs.length()) {
+            val tab = tabs.optJSONObject(i)?.optJSONObject("tabRenderer") ?: continue
+            val title = tab.optString("title")
+            if (!title.equals("Related", ignoreCase = true) && !title.contains("相关")) continue
+            val watch = tab.optJSONObject("endpoint")?.optJSONObject("watchEndpoint")
+                ?: continue
+            val params = watch.optString("params").takeIf { it.isNotEmpty() } ?: return null
+            return RelatedTab(
+                videoId = watch.optString("videoId").takeIf { it.isNotEmpty() },
+                playlistId = watch.optString("playlistId").takeIf { it.isNotEmpty() },
+                params = params,
+            )
+        }
+        return null
+    }
+
+    /** Parses one shelf's `contents` array (two-row cards + list items). */
+    private fun parseShelfContents(
+        contents: org.json.JSONArray?,
+        title: String?,
+    ): com.zenmusic.core.model.ZenShelf {
+        val tracks = ArrayList<ZenTrack>()
+        val albums = ArrayList<ZenAlbum>()
+        val artists = ArrayList<ZenArtist>()
+        val playlists = ArrayList<com.zenmusic.core.model.ZenPlaylist>()
+        for (i in 0 until (contents?.length() ?: 0)) {
+            val entry = contents?.optJSONObject(i) ?: continue
+            val twoRow = entry.optJSONObject("musicTwoRowItemRenderer")
+            if (twoRow != null) {
+                parseTwoRowItem(twoRow)?.let {
+                    when (it.second) {
+                        is ZenTrack -> tracks.add(it.second as ZenTrack)
+                        is ZenAlbum -> albums.add(it.second as ZenAlbum)
+                        is ZenArtist -> artists.add(it.second as ZenArtist)
+                        is com.zenmusic.core.model.ZenPlaylist ->
+                            playlists.add(it.second as com.zenmusic.core.model.ZenPlaylist)
+                    }
+                }
+                continue
+            }
+            val listItem = entry.optJSONObject("musicResponsiveListItemRenderer")
+            if (listItem != null) {
+                parseResponsiveListItem(listItem)?.let { tracks.add(it) }
+            }
+        }
+        return com.zenmusic.core.model.ZenShelf(
+            title = title?.takeIf { it.isNotBlank() },
+            tracks = tracks.distinctBy { it.uri },
+            albums = albums.distinctBy { it.uri },
+            artists = artists.distinctBy { it.uri },
+            playlists = playlists.distinctBy { it.uri },
+        )
+    }
+
+    /**
+     * Parses a `musicTwoRowItemRenderer` (home/carousel card) into whichever
+     * entity its navigation endpoint points at: track (watch), album (MPRE),
+     * artist (UC), or playlist (VL / watch playlistId).
+     */
+    private fun parseTwoRowItem(item: JSONObject): Pair<String, Any>? {
+        val nav = item.optJSONObject("navigationEndpoint") ?: return null
+        val watch = nav.optJSONObject("watchEndpoint")
+        val browse = nav.optJSONObject("browseEndpoint")
+        val title = JsonWalk.firstRunText(item.optJSONObject("title"))
+            ?: JsonWalk.allRunText(item.optJSONObject("title"))
+            ?: return null
+        val subtitle = JsonWalk.firstRunText(item.optJSONObject("subtitle"))
+            ?: JsonWalk.allRunText(item.optJSONObject("subtitle")).orEmpty()
+        val thumb = JsonWalk.thumbnailUrl(
+            item.optJSONObject("thumbnailRenderer")?.optJSONObject("musicThumbnailRenderer")
+                ?: item.optJSONObject("thumbnailRenderer"),
+        )
+        // overlay badge distinguishes SONG vs VIDEO cards
+        var isVideo = false
+        for (badge in JsonWalk.findAllObjects(item, "overlayMetadata")) {
+            JsonWalk.allRunText(badge.optJSONObject("primaryText"))?.let { pt ->
+                if (pt.contains("Video", ignoreCase = true)) isVideo = true
+            }
+        }
+        if (subtitle.contains("Video", ignoreCase = true) && subtitle.contains(" views", ignoreCase = true)) {
+            isVideo = true
+        }
+
+        val videoId = watch?.optString("videoId")?.takeIf { it.isNotEmpty() }
+        if (videoId != null) {
+            return "track" to ZenTrack(
+                uri = ZenUri.mint(videoId),
+                title = title,
+                artists = listOfNotNull(subtitle.takeIf { it.isNotEmpty() }),
+                durationMs = -1L,
+                artworkUri = thumb?.let { ZenUri.mintArtwork(videoId) },
+                isVideo = isVideo,
+                source = ZenContentSource.MUSIC,
+            )
+        }
+        val browseId = browse?.optString("browseId")?.takeIf { it.isNotEmpty() }
+        if (browseId != null) {
+            when {
+                browseId.startsWith("MPRE") || browseId.startsWith("MPR") -> return "album" to ZenAlbum(
+                    uri = ZenUri.mintBrowse(browseId),
+                    title = title,
+                    artist = subtitle.takeIf { it.isNotEmpty() },
+                    artworkUri = thumb?.let { ZenUri.mintBrowse(browseId) },
+                )
+                browseId.startsWith("UC") -> return "artist" to ZenArtist(
+                    uri = ZenUri.mintBrowse(browseId),
+                    name = title,
+                    artworkUri = thumb?.let { ZenUri.mintBrowse(browseId) },
+                    subscribers = subtitle.takeIf { it.contains("subscriber", true) },
+                )
+                browseId.startsWith("VL") -> {
+                    val playlistId = browseId.removePrefix("VL")
+                    return "playlist" to com.zenmusic.core.model.ZenPlaylist(
+                        uri = ZenUri.mintBrowse(playlistId),
+                        title = title,
+                        author = subtitle.takeIf { it.isNotEmpty() },
+                        artworkUri = thumb?.let { ZenUri.mintBrowse(playlistId) },
+                    )
+                }
+            }
+        }
+        val playlistId = watch?.optString("playlistId")?.takeIf { it.isNotEmpty() }
+        if (playlistId != null) {
+            return "playlist" to com.zenmusic.core.model.ZenPlaylist(
+                uri = ZenUri.mintBrowse(playlistId),
+                title = title,
+                author = subtitle.takeIf { it.isNotEmpty() },
+                artworkUri = thumb?.let { ZenUri.mintBrowse(playlistId) },
+            )
+        }
+        return null
+    }
+
+    /** List-style shelf item (`musicResponsiveListItemRenderer`) → track. */
+    private fun parseResponsiveListItem(item: JSONObject): ZenTrack? {
+        val videoId = JsonWalk.videoIdOf(item) ?: return null
+        val title = JsonWalk.flexColumnText(item, 0) ?: return null
+        val byline = JsonWalk.flexColumnText(item, 1).orEmpty()
+        val parts = byline.split(" • ", " · ").map { it.trim() }.filter { it.isNotEmpty() }
+        return ZenTrack(
+            uri = ZenUri.mint(videoId),
+            title = title,
+            artists = if (parts.isNotEmpty()) listOf(parts.first()) else emptyList(),
+            album = parts.getOrNull(1),
+            durationMs = parseDurationText(fixedColumnText(item)),
+            artworkUri = JsonWalk.thumbnailUrl(item)?.let { ZenUri.mintArtwork(videoId) },
+        )
+    }
 }

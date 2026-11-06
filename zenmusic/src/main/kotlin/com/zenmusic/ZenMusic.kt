@@ -7,6 +7,8 @@ import com.zenmusic.core.log.ZenLog
 import com.zenmusic.potoken.PotokenCoordinator
 import com.zenmusic.potoken.RhinoPotokenMinter
 import com.zenmusic.resolver.TamperDetector
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 
@@ -44,8 +46,8 @@ object ZenMusic {
         val appContext = context.applicationContext
 
         val http = OkHttpClient.Builder()
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(45, TimeUnit.SECONDS)
+            .connectTimeout(8, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .build()
 
@@ -129,11 +131,28 @@ class ZenEngine internal constructor(
     val resolver: com.zenmusic.resolver.ZenResolver,
     val dataSourceFactory: com.zenmusic.datasource.ZenDataSourceFactory,
 ) {
+
+    /** Background scope for the automatic warmup (cancelled on destroy). */
+    private val appScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO,
+    )
+
+    init {
+        // Cut time-to-first-play: mint tokens / cipher while the host app is
+        // still starting. Best-effort — failures simply leave the engine cold.
+        if (config.warmupOnStart) {
+            appScope.launch { runCatching { warmup() } }
+        }
+    }
+
     /** YT Music search (songs / videos / albums / artists). */
     val search: com.zenmusic.extractor.ZenSearchApi get() = extractor.search
 
-    /** Radio / related-song queues. */
+    /** Radio / related-song queues (real two-phase Related tab). */
     val radio: com.zenmusic.extractor.ZenRadioApi get() = extractor.radio
+
+    /** The official home feed (chips + titled shelves). */
+    val home: com.zenmusic.extractor.ZenHomeApi get() = extractor.home
 
     /** LRCLIB synced lyrics. */
     val lyrics: com.zenmusic.extractor.ZenLyricsApi get() = extractor.lyrics
@@ -141,6 +160,32 @@ class ZenEngine internal constructor(
     /** Resolves a zen:// uri into a playable, opaque [com.zenmusic.core.model.ZenStream]. */
     suspend fun resolve(uri: String, quality: com.zenmusic.core.model.ZenQuality? = null) =
         resolver.resolve(uri, quality)
+
+    /**
+     * Warms the whole playback chain (visitor + PO-token WebView + cipher)
+     * without fetching media. Runs automatically at initialize; call again
+     * after long backgrounding or a network change if you want a re-warm.
+     */
+    suspend fun warmup() {
+        extractor.warmup()
+    }
+
+    /**
+     * Resolves [uri] in the background so the later [resolve] is instant —
+     * call it for the next queue item while the current song plays:
+     *
+     * ```
+     * player.addListener(onMediaItemTransition = { zen.prefetch(nextTrack.uri) })
+     * ```
+     */
+    suspend fun prefetch(uri: String, quality: com.zenmusic.core.model.ZenQuality? = null) {
+        resolver.prefetch(uri, quality)
+    }
+
+    /** Prefetches a whole queue sequentially (best-effort, failures skipped). */
+    suspend fun prefetchAll(uris: List<String>, quality: com.zenmusic.core.model.ZenQuality? = null) {
+        for (uri in uris) resolver.prefetch(uri, quality)
+    }
 
     /** Track metadata for a zen:// uri / media id. */
     suspend fun track(uri: String) = extractor.track(uri)
@@ -161,9 +206,11 @@ class ZenEngine internal constructor(
             android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
         }
 
-    /** Internal state nuke (tokens, broker handles, visitor data). */
+    /** Internal state nuke (tokens, broker handles, caches, visitor data). */
     fun destroy() {
+        appScope.cancel()
         resolver.destroy()
+        extractor.invalidatePlayerCache()
         potoken.close()
         ZenVaultPurge.purge()
     }

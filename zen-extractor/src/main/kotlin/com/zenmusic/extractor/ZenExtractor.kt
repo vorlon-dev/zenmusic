@@ -20,8 +20,8 @@ import okhttp3.OkHttpClient
  */
 class ZenExtractor(
     private val http: OkHttpClient,
-    config: com.zenmusic.core.ZenConfig,
-    potoken: PotokenCoordinator,
+    internal val config: com.zenmusic.core.ZenConfig,
+    private val potoken: PotokenCoordinator,
     private val streamEnhancer: StreamUrlEnhancer? = null,
     /** Recovers googlevideo URLs from `signatureCipher` formats (web clients). */
     private val decipher: SignatureDecipher? = null,
@@ -40,12 +40,67 @@ class ZenExtractor(
 
     val search: ZenSearchApi = ZenSearchApi(zenApi)
     val radio: ZenRadioApi = ZenRadioApi(zenApi)
+    val home: ZenHomeApi = ZenHomeApi(zenApi)
     val lyrics: ZenLyricsApi = ZenLyricsApi(http, config)
+
+    // ---------- player-response cache ----------
+
+    private class CachedPlayer(
+        @field:Volatile var payload: org.json.JSONObject? = null,
+        var atMs: Long = 0L,
+    )
+
+    private val playerCache = java.util.concurrent.ConcurrentHashMap<String, CachedPlayer>()
+
+    /**
+     * Player response for [mediaId], served from a short-lived cache when a
+     * recent one exists — repeat plays, prefetch hits and queue lookups skip
+     * the whole extraction chain. Fails the resolve when upstream fails.
+     */
+    private suspend fun playerCached(mediaId: String): org.json.JSONObject {
+        val ttlMs = config.playerCacheTtlSeconds.coerceAtLeast(0) * 1000L
+        val hit = playerCache[mediaId]
+        if (hit != null && ttlMs > 0) {
+            val cachedPayload = hit.payload
+            if (cachedPayload != null && System.currentTimeMillis() - hit.atMs < ttlMs) {
+                return cachedPayload
+            }
+        }
+        val payload = zenApi.player(mediaId)
+        val entry = hit ?: CachedPlayer().also { playerCache[mediaId] = it }
+        entry.payload = payload
+        entry.atMs = System.currentTimeMillis()
+        if (playerCache.size > PLAYER_CACHE_MAX) {
+            playerCache.entries.removeIf {
+                System.currentTimeMillis() - it.value.atMs > ttlMs.coerceAtLeast(1)
+            }
+            while (playerCache.size > PLAYER_CACHE_MAX) {
+                val eldest = playerCache.entries.asSequence().minByOrNull { it.value.atMs }
+                playerCache.remove(eldest?.key) ?: break
+            }
+        }
+        return payload
+    }
+
+    /** Drops every cached player response (e.g. network change, logout). */
+    fun invalidatePlayerCache() = playerCache.clear()
+
+    /**
+     * Warms the whole playback chain without fetching any media: session
+     * visitor, PO-token WebView mint and the player-JS cipher. Called in the
+     * background right after wiring (see [com.zenmusic.core.ZenConfig.warmupOnStart])
+     * so the first real playback resolves in one request.
+     */
+    suspend fun warmup() {
+        val visitor = zenApi.sessionIdentifier()
+        runCatching { potoken.sessionTokenOrNull(visitor) }
+        runCatching { signatureTimestamp?.invoke() }
+    }
 
     /** Fetches track metadata for a media id / zen:// uri. */
     suspend fun track(uriOrMediaId: String): ZenTrack {
         val mediaId = mediaIdOf(uriOrMediaId)
-        val payload = zenApi.player(mediaId)
+        val payload = playerCached(mediaId)
         val p = Parsers.parsePlayer(payload, decipher?.asLambda())
         return ZenTrack(
             uri = ZenUri.mint(p.mediaId),
@@ -97,7 +152,7 @@ class ZenExtractor(
         quality: ZenQuality? = null,
     ): StreamPlan {
         val mediaId = mediaIdOf(uriOrMediaId)
-        val payload = zenApi.player(mediaId)
+        val payload = playerCached(mediaId)
         val parsed = Parsers.parsePlayer(payload, decipher?.asLambda())
         val chosen = Parsers.chooseFormat(
             parsed.formats,
@@ -121,6 +176,9 @@ class ZenExtractor(
     }
 
     companion object {
+        /** Upper bound of cached player responses. */
+        private const val PLAYER_CACHE_MAX = 64
+
         /** Accepts a zen:// uri, a bare media id, and tolerates junk. */
         fun mediaIdOf(uriOrMediaId: String): String {
             ZenUri.parse(uriOrMediaId)?.let { if (it.kind == ZenUri.Kind.STREAM) return it.id }

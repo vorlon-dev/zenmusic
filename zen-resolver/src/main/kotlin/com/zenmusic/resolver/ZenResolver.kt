@@ -39,6 +39,58 @@ class ZenResolver(
 
     internal val broker = StreamBroker()
 
+    // ---------- prefetch ----------
+
+    private val prefetched = LinkedHashMap<String, com.zenmusic.core.model.ZenStream>()
+
+    private fun prefetchKey(uri: String, quality: ZenQuality?) = "$uri|${quality ?: "-"}"
+
+    /**
+     * Remembers an already-resolved stream so the next [resolve] for the same
+     * uri+quality returns instantly (engine-internal; also the test hook).
+     */
+    internal fun rememberPrefetched(uri: String, quality: ZenQuality?, stream: com.zenmusic.core.model.ZenStream) {
+        synchronized(prefetched) {
+            prefetched[prefetchKey(uri, quality)] = stream
+            while (prefetched.size > PREFETCH_MAX) {
+                val eldest = prefetched.keys.firstOrNull() ?: break
+                prefetched.remove(eldest)
+            }
+        }
+    }
+
+    private fun takePrefetched(uri: String, quality: ZenQuality?): com.zenmusic.core.model.ZenStream? {
+        synchronized(prefetched) {
+            val key = prefetchKey(uri, quality)
+            val stream = prefetched.remove(key) ?: return null
+            // must still be comfortably valid when the player opens it
+            if (stream.expiresAtMs - System.currentTimeMillis() < 60_000L) return null
+            return stream
+        }
+    }
+
+    /**
+     * Resolves [uri] in the background so a later [resolve] is instant.
+     * Ideal for auto-queues: while the current song plays, prefetch the next
+     * one — the next track then starts without any extraction latency.
+     */
+    suspend fun prefetch(uri: String, quality: ZenQuality? = null) {
+        synchronized(prefetched) {
+            if (prefetched.containsKey(prefetchKey(uri, quality))) return
+        }
+        try {
+            val stream = resolve(uri, quality)
+            rememberPrefetched(uri, quality, stream)
+        } catch (_: Throwable) {
+            // prefetch is best-effort; the real resolve reports errors
+        }
+    }
+
+    /** True when a fresh prefetched stream exists for [uri]. */
+    fun isPrefetched(uri: String, quality: ZenQuality? = null): Boolean {
+        synchronized(prefetched) { return prefetched.containsKey(prefetchKey(uri, quality)) }
+    }
+
     /**
      * Resolves one zen:// stream uri. Throws [com.zenmusic.core.ZenResolutionException]
      * on failure; returns a decoy stream when tampering is detected and the
@@ -54,6 +106,8 @@ class ZenResolver(
             com.zenmusic.core.log.ZenLog.w("tamper signal — serving shower decoy")
             return com.zenmusic.core.decoy.ZenDecoys.shower(1).first()
         }
+        // Fast path: a prefetched stream for this exact uri+quality.
+        takePrefetched(uri, quality)?.let { return it }
         val plan = extractor.streamPlan(parsed.id, quality ?: config.preferredQuality)
         return broker.register(plan)
     }
@@ -88,9 +142,16 @@ class ZenResolver(
         return extractor.artworkBytes(parsed.id)
     }
 
-    /** Drops expired broker entries. */
+    /** Drops expired broker entries and stale prefetches. */
     fun purgeExpired(): Int = broker.purge()
 
     /** Nukes all broker state (e.g. on logout / account switch). */
-    fun destroy() = broker.clear()
+    fun destroy() {
+        synchronized(prefetched) { prefetched.clear() }
+        broker.clear()
+    }
+
+    companion object {
+        private const val PREFETCH_MAX = 12
+    }
 }

@@ -6,6 +6,8 @@ import com.zenmusic.core.vault.ZenVault
 import com.zenmusic.potoken.PoToken
 import com.zenmusic.potoken.PotokenCoordinator
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -108,11 +110,66 @@ internal class ZenInnertube(
     /** Session identifier used for PO token binding. */
     suspend fun sessionIdentifier(): String = ensureVisitorData()
 
+    private class Attempt(
+        val response: JSONObject? = null,
+        val error: Throwable? = null,
+    )
+
     /**
-     * Executes a `player` request trying each identity in order. Returns the
-     * first response that actually carries usable audio formats; if no
-     * identity does, the first playable response is returned so the caller's
-     * diagnostic can describe exactly what was withheld.
+     * One identity attempt with its mid-session visitor-rotation recovery.
+     * Runs on its own coroutine; never throws.
+     */
+    private suspend fun attempt(
+        mediaId: String,
+        client: ClientIdentity,
+        tag: String,
+        visitor: String,
+        sts: Int?,
+        token: String?,
+    ): Attempt {
+        return try {
+            var response = rawPlayer(mediaId, client, visitor, sts, token)
+            if (isPlayable(response)) {
+                // Mid-session visitor rotation: the server answers OK but
+                // withholds every stream format when the token was minted
+                // against a previous visitor (the rotation is echoed in
+                // responseContext). Re-mint against the new visitor and
+                // retry this client once instead of failing the resolve.
+                val rotated = captureVisitorData(response)
+                if (rotated && client.needsPoToken && !hasUsableAudio(response)) {
+                    val newVisitor = visitorData
+                    val fresh = newVisitor?.let { potoken.sessionTokenOrNull(it) }
+                    if (newVisitor != null && fresh != null && fresh.value != token) {
+                        ZenLog.d { "visitor rotated; re-minting session token" }
+                        val retried = rawPlayer(mediaId, client, newVisitor, sts, fresh.value)
+                        if (isPlayable(retried)) {
+                            captureVisitorData(retried)
+                            response = retried
+                        }
+                    }
+                }
+                return Attempt(response = response)
+            }
+            Attempt(
+                error = ZenExtractionException(
+                    "playability: " + response.optJSONObject("playabilityStatus")
+                        ?.optString("reason").orEmpty().ifEmpty { "unplayable" },
+                ),
+            )
+        } catch (t: Throwable) {
+            ZenLog.w("player attempt failed via=$tag: ${t.message}", t)
+            Attempt(error = t)
+        }
+    }
+
+    /**
+     * Executes a `player` request. The first three identities race in
+     * parallel (one round trip instead of three) and are consumed in
+     * priority order — WEB_REMIX wins when it delivers usable audio, else
+     * the keyless VISIONOS identities, else TVHTML5_SIMPLY sequentially.
+     * Returns the first response that actually carries usable audio
+     * formats; if no identity does, the first playable response is returned
+     * so the caller's diagnostic can describe exactly what was withheld.
      */
     suspend fun player(mediaId: String): JSONObject = withContext(Dispatchers.IO) {
         val visitor = ensureVisitorData()
@@ -124,58 +181,53 @@ internal class ZenInnertube(
             null
         }
 
-        val attempts: List<Pair<ClientIdentity, String>> = listOf(
-            remix to "remix",
-            visionos to "visionos",
-            visionos103 to "visionos2",
-            tvs to "tvs",
-        )
         var firstPlayable: JSONObject? = null
         var lastError: Throwable? = null
-        for ((client, tag) in attempts) {
-            val token = if (client.needsPoToken) sessionPot?.value else null
-            try {
-                var response = rawPlayer(mediaId, client, visitor, sts, token)
-                if (isPlayable(response)) {
-                    // Mid-session visitor rotation: the server answers OK but
-                    // withholds every stream format when the token was minted
-                    // against a previous visitor (the rotation is echoed in
-                    // responseContext). Re-mint against the new visitor and
-                    // retry this client once instead of failing the resolve.
-                    val rotated = captureVisitorData(response)
-                    if (rotated && client.needsPoToken && !hasUsableAudio(response)) {
-                        val newVisitor = visitorData
-                        val fresh = newVisitor?.let { potoken.sessionTokenOrNull(it) }
-                        if (newVisitor != null && fresh != null && fresh.value != token) {
-                            ZenLog.d { "visitor rotated; re-minting session token" }
-                            val retried = rawPlayer(mediaId, client, newVisitor, sts, fresh.value)
-                            if (isPlayable(retried)) {
-                                captureVisitorData(retried)
-                                response = retried
-                            }
-                        }
-                    }
-                    if (firstPlayable == null) firstPlayable = response
-                    if (hasUsableAudio(response)) {
-                        ZenLog.d { "player ok via=$tag media=${mediaId.take(4)}**" }
-                        return@withContext response
-                    }
-                    // OK but the server withheld the stream URLs — do not win
-                    // the chain; let the next identity try.
-                    ZenLog.d { "player ok-but-withheld via=$tag" }
-                } else {
-                    lastError = ZenExtractionException(
-                        "playability: " + response.optJSONObject("playabilityStatus")
-                            ?.optString("reason").orEmpty().ifEmpty { "unplayable" },
-                    )
-                }
-            } catch (t: Throwable) {
-                lastError = t
-                ZenLog.w("player attempt failed via=$tag: ${t.message}", t)
+
+        kotlinx.coroutines.coroutineScope {
+            val raced = listOf(
+                Triple(remix, "remix", sessionPot?.value),
+                Triple(visionos, "visionos", null),
+                Triple(visionos103, "visionos2", null),
+            ).map { (client, tag, token) ->
+                async { attempt(mediaId, client, tag, visitor, sts, token) }
             }
+            try {
+                for ((idx, deferred) in raced.withIndex()) {
+                    val attemptResult = deferred.await()
+                    val response = attemptResult.response
+                    if (response != null && isPlayable(response)) {
+                        if (firstPlayable == null) firstPlayable = response
+                        if (hasUsableAudio(response)) {
+                            ZenLog.d { "player ok via=${listOf("remix", "visionos", "visionos2")[idx]} media=${mediaId.take(4)}**" }
+                            return@coroutineScope response
+                        }
+                        // OK but the server withheld the stream URLs — do not
+                        // win the chain; let the next identity (already in
+                        // flight) take it.
+                        ZenLog.d { "player ok-but-withheld via=${listOf("remix", "visionos", "visionos2")[idx]}" }
+                    } else {
+                        lastError = lastError ?: attemptResult.error
+                    }
+                }
+            } finally {
+                raced.forEach { runCatching { it.cancel() } }
+            }
+
+            // Sequential last resort: web-style ciphered client.
+            val tvsAttempt = attempt(mediaId, tvs, "tvs", visitor, sts, sessionPot?.value)
+            val response = tvsAttempt.response
+            if (response != null && isPlayable(response)) {
+                firstPlayable = firstPlayable ?: response
+                if (hasUsableAudio(response)) {
+                    ZenLog.d { "player ok via=tvs media=${mediaId.take(4)}**" }
+                    return@coroutineScope response
+                }
+            }
+            lastError = lastError ?: tvsAttempt.error
+            firstPlayable?.let { return@coroutineScope it }
+            throw ZenExtractionException("stream extraction failed for media", lastError)
         }
-        firstPlayable?.let { return@withContext it }
-        throw ZenExtractionException("stream extraction failed for media", lastError)
     }
 
     /**
@@ -213,14 +265,33 @@ internal class ZenInnertube(
         )
     }
 
-    /** Executes a `next` request (radio / related queue). */
-    suspend fun next(videoId: String?, playlistId: String?): JSONObject =
+    /**
+     * Executes a `next` request (watch-next / radio queue / related tab).
+     * [params] carries the serialized watch endpoint of a specific tab
+     * (e.g. the Related tab of the music watch-next response).
+     */
+    suspend fun next(videoId: String?, playlistId: String?, params: String? = null): JSONObject =
         withContext(Dispatchers.IO) {
             val visitor = ensureVisitorData()
             val body = JSONObject().put("context", context(remix, visitor))
             videoId?.let { body.put("videoId", it) }
             playlistId?.let { body.put("playlistId", it) }
+            params?.let { body.put("params", it) }
             post("next", remix, body, visitor).also { captureVisitorData(it) }
+        }
+
+    /**
+     * Executes a `browse` request — the engine behind the music app's home
+     * feed ([ZenHomeApi] uses `FEmusic_home`) and catalog pages.
+     */
+    suspend fun browse(browseId: String, params: String? = null): JSONObject =
+        withContext(Dispatchers.IO) {
+            val visitor = ensureVisitorData()
+            val body = JSONObject()
+                .put("context", context(remix, visitor))
+                .put("browseId", browseId)
+            params?.let { body.put("params", it) }
+            post("browse", remix, body, visitor).also { captureVisitorData(it) }
         }
 
     private suspend fun rawPlayer(

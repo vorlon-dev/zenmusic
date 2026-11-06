@@ -15,5 +15,5 @@ subprojects {
     // and rewrites whatever is set here; this value keeps local
     // publishToMavenLocal output stable.
     group = "com.github.vorlon-dev"
-    version = "1.1.0"
+    version = "1.1.2"
 }

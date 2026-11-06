@@ -32,4 +32,13 @@ data class ZenConfig(
     val visitorData: String? = null,
     /** Requested artwork width in px for disguised artwork URIs. */
     val artworkWidth: Int = 544,
+    /**
+     * Warm the whole playback chain in the background the moment
+     * [com.zenmusic.ZenMusic.initialize] returns — session visitor, PO-token
+     * WebView mint, player-JS cipher. First playback then resolves in a
+     * single request instead of a cold-start chain (recommended).
+     */
+    val warmupOnStart: Boolean = true,
+    /** How long a fetched player response may be re-used for repeat plays (seconds). */
+    val playerCacheTtlSeconds: Int = 20 * 60,
 )
